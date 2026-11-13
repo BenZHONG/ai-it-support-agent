@@ -1,81 +1,103 @@
 # agent.py
 
-from tools import (
-    check_device,
-    check_user,
-    create_ticket,
-    search_knowledge_base,
+from typing import Any
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+    RateLimitError,
 )
 
+from config import get_api_key, get_model
+from prompts import IT_SUPPORT_SYSTEM_PROMPT
 
-def run_agent(
-    employee_id: str,
-    message: str,
-) -> None:
-    print(f"\nUser: {message}")
 
-    # Step 1: Check employee
-    user_result = check_user(employee_id)
+class ITSupportAgent:
+    """Stage 2: LLM-powered IT Support Assistant."""
 
-    if not user_result["found"]:
-        print("Agent: Employee not found.")
-        return
-
-    user = user_result["user"]
-
-    if not user["active"]:
-        print("Agent: Employee account is inactive.")
-        return
-
-    print(f"Agent: Hello {user['name']}.")
-
-    # Step 2: Search knowledge base
-    kb_result = search_knowledge_base(message)
-
-    # Step 3: Check device
-    device_result = check_device(user["device_id"])
-
-    if not device_result["found"]:
-        print("Agent: Device not found.")
-        return
-
-    device = device_result["device"]
-
-    print(f"Agent: Device: {device['name']}")
-    print(f"Agent: Wi-Fi adapter: {device['wifi_adapter']}")
-
-    # Step 4: Recommend solution
-    if kb_result["found"]:
-        print("\nAgent: Please try these steps:")
-        print(kb_result["solution"])
-    else:
-        print("Agent: No matching knowledge article found.")
-
-    # Step 5: Ask whether the issue is resolved
-    answer = input("\nDid this solve your problem? (yes/no): ")
-    answer = answer.strip().lower()
-
-    if answer == "yes":
-        print("Agent: Great! Your issue is resolved.")
-
-    elif answer == "no":
-        confirmation = (
-            input("Would you like me to create a support ticket? (yes/no): ")
-            .strip()
-            .lower()
+    def __init__(
+        self,
+        client: Any | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.client = client or OpenAI(
+            api_key=get_api_key(),
+            timeout=30.0,
+            max_retries=2,
         )
 
-        if confirmation != "yes":
-            print("Agent: No ticket was created.")
-            return
+        self.model = model or get_model()
 
-        ticket = create_ticket(
-            employee_id=employee_id,
-            summary="Laptop Wi-Fi connection issue",
-            description=message,
+        # Conversation history stored in memory.
+        self.history: list[dict[str, str]] = []
+
+    def chat(self, message: str) -> str:
+        """Send a message and return the AI response."""
+
+        message = message.strip()
+
+        if not message:
+            raise ValueError("Message cannot be empty.")
+
+        if len(message) > 4000:
+            raise ValueError("Message is too long.")
+
+        # Include previous successful conversation turns.
+        conversation = [
+            *self.history,
+            {
+                "role": "user",
+                "content": message,
+            },
+        ]
+
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=IT_SUPPORT_SYSTEM_PROMPT,
+                input=conversation,
+                store=False,
+                max_output_tokens=1200,
+            )
+
+            answer = (response.output_text or "").strip()
+
+            if not answer:
+                return "I could not generate an answer. Please try again."
+
+        except RateLimitError:
+            return (
+                "The AI service is busy or has reached "
+                "its usage limit. Please try again later."
+            )
+
+        except (APIConnectionError, APITimeoutError):
+            return "I cannot connect to the AI service. Please try again later."
+
+        except APIStatusError:
+            return (
+                "The AI service returned an error. "
+                "Please contact IT support if it continues."
+            )
+
+        # Only save successful conversation turns.
+        self.history.extend(
+            [
+                {
+                    "role": "user",
+                    "content": message,
+                },
+                {
+                    "role": "assistant",
+                    "content": answer,
+                },
+            ]
         )
 
-        print(f"Agent: Ticket {ticket['ticket_id']} has been created.")
+        return answer
 
-    else:
-        print("Agent: Please reply yes or no.")
+    def reset_conversation(self) -> None:
+        """Clear the current conversation history."""
+        self.history.clear()
