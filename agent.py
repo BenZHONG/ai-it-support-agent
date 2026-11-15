@@ -1,5 +1,3 @@
-# agent.py
-
 from typing import Any
 
 from openai import (
@@ -8,6 +6,10 @@ from openai import (
     APITimeoutError,
     OpenAI,
     RateLimitError,
+)
+from openai.types.responses import (
+    EasyInputMessageParam,
+    ResponseInputParam,
 )
 
 from config import get_api_key, get_model
@@ -22,16 +24,20 @@ class ITSupportAgent:
         client: Any | None = None,
         model: str | None = None,
     ) -> None:
-        self.client = client or OpenAI(
-            api_key=get_api_key(),
-            timeout=30.0,
-            max_retries=2,
+        self.client = (
+            client
+            if client is not None
+            else OpenAI(
+                api_key=get_api_key(),
+                timeout=30.0,
+                max_retries=2,
+            )
         )
 
         self.model = model or get_model()
 
         # Conversation history stored in memory.
-        self.history: list[dict[str, str]] = []
+        self.history: ResponseInputParam = []
 
     def chat(self, message: str) -> str:
         """Send a message and return the AI response."""
@@ -44,13 +50,16 @@ class ITSupportAgent:
         if len(message) > 4000:
             raise ValueError("Message is too long.")
 
+        # Create a typed user message.
+        user_message: EasyInputMessageParam = {
+            "role": "user",
+            "content": message,
+        }
+
         # Include previous successful conversation turns.
-        conversation = [
+        conversation: ResponseInputParam = [
             *self.history,
-            {
-                "role": "user",
-                "content": message,
-            },
+            user_message,
         ]
 
         try:
@@ -82,17 +91,17 @@ class ITSupportAgent:
                 "Please contact IT support if it continues."
             )
 
+        # Create a typed assistant message.
+        assistant_message: EasyInputMessageParam = {
+            "role": "assistant",
+            "content": answer,
+        }
+
         # Only save successful conversation turns.
         self.history.extend(
             [
-                {
-                    "role": "user",
-                    "content": message,
-                },
-                {
-                    "role": "assistant",
-                    "content": answer,
-                },
+                user_message,
+                assistant_message,
             ]
         )
 
