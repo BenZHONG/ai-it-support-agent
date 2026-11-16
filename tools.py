@@ -1,55 +1,85 @@
 # tools.py
 
+from uuid import uuid4
+
 USERS = {
     "EMP001": {
+        "employee_id": "EMP001",
         "name": "John Smith",
         "department": "Finance",
         "active": True,
         "device_id": "LAPTOP001",
-    }
+    },
+    "EMP002": {
+        "employee_id": "EMP002",
+        "name": "Sarah Lee",
+        "department": "HR",
+        "active": True,
+        "device_id": "LAPTOP002",
+    },
 }
 
 DEVICES = {
     "LAPTOP001": {
+        "device_id": "LAPTOP001",
+        "owner": "EMP001",
         "name": "Dell Latitude 5440",
         "status": "online",
         "wifi_adapter": "disabled",
-    }
+    },
+    "LAPTOP002": {
+        "device_id": "LAPTOP002",
+        "owner": "EMP002",
+        "name": "HP EliteBook",
+        "status": "online",
+        "wifi_adapter": "enabled",
+    },
 }
 
 KNOWLEDGE_BASE = {
-    "wifi": (
-        "1. Open Windows Settings.\n"
-        "2. Select Network & Internet.\n"
-        "3. Enable Wi-Fi.\n"
-        "4. Reconnect to the company network."
-    )
+    "wifi": {
+        "title": "Troubleshoot Wi-Fi connectivity",
+        "content": (
+            "1. Open Windows Settings.\n"
+            "2. Select Network & Internet.\n"
+            "3. Check that Wi-Fi is enabled.\n"
+            "4. Reconnect to the company network.\n"
+            "5. If unresolved, contact IT support."
+        ),
+    }
 }
 
-TICKETS = {}
+TICKETS: dict[str, dict] = {}
 
 
 def search_knowledge_base(query: str) -> dict:
-    """Search fictional IT knowledge articles."""
-    if "wifi" in query.lower() or "wi-fi" in query.lower():
+    text = query.lower()
+
+    if "wifi" in text or "wi-fi" in text:
         return {
             "found": True,
-            "solution": KNOWLEDGE_BASE["wifi"],
+            "article": KNOWLEDGE_BASE["wifi"],
         }
 
-    return {"found": False, "solution": None}
+    return {"found": False, "article": None}
 
 
 def check_user(employee_id: str) -> dict:
-    """Retrieve fictional employee information."""
     user = USERS.get(employee_id)
-    return {"found": user is not None, "user": user}
+
+    return {
+        "found": user is not None,
+        "user": user,
+    }
 
 
 def check_device(device_id: str) -> dict:
-    """Retrieve fictional device status."""
     device = DEVICES.get(device_id)
-    return {"found": device is not None, "device": device}
+
+    return {
+        "found": device is not None,
+        "device": device,
+    }
 
 
 def create_ticket(
@@ -57,8 +87,7 @@ def create_ticket(
     summary: str,
     description: str,
 ) -> dict:
-    """Create a fictional IT ticket."""
-    ticket_id = f"INC{len(TICKETS) + 1:04d}"
+    ticket_id = f"INC-{uuid4().hex[:12].upper()}"
 
     ticket = {
         "ticket_id": ticket_id,
@@ -73,10 +102,9 @@ def create_ticket(
 
 
 def get_ticket_status(ticket_id: str) -> dict:
-    """Retrieve the status of a fictional ticket."""
     ticket = TICKETS.get(ticket_id)
 
-    if ticket is None:
-        return {"found": False, "ticket": None}
-
-    return {"found": True, "ticket": ticket}
+    return {
+        "found": ticket is not None,
+        "ticket": ticket,
+    }
