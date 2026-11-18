@@ -1,5 +1,6 @@
 # schemas.py
 
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -48,3 +49,31 @@ class EmployeeContext(BaseModel):
             "ticket:create:self",
         }
     )
+
+
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ConfidenceLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class DiagnosisResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    problem: str = Field(min_length=1, max_length=300)
+    likely_cause: str = Field(min_length=1, max_length=500)
+    confidence: ConfidenceLevel
+    evidence: list[str] = Field(max_length=10)
+    troubleshooting_steps: list[str] = Field(
+        min_length=1,
+        max_length=10,
+    )
+    needs_escalation: bool
