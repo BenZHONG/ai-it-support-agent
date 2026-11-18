@@ -1,33 +1,24 @@
-# agent.py
-
-import json
 from typing import Any
 
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    OpenAI,
-    RateLimitError,
-)
+from openai import OpenAI
 
 from config import get_api_key, get_model
-from prompts import IT_SUPPORT_SYSTEM_PROMPT
-from schemas import EmployeeContext
-from ticket_workflow import TicketWorkflow
-from tool_definitions import ALL_TOOLS
-from tool_executor import (
-    ToolError,
-    execute_tool,
-    validate_arguments,
+from diagnosis import DiagnosisError, DiagnosisService
+from schemas import (
+    DiagnosisResult,
+    EmployeeContext,
 )
+from ticket_workflow import TicketWorkflow
+from tool_executor import ToolError
+from workflow import Workflow, WorkflowState
 
-MAX_MODEL_ROUNDS = 6
-MAX_TOOL_CALLS = 10
-MAX_HISTORY_ITEMS = 40
+MAX_TOOL_CALLS = 5
+MAX_READ_ATTEMPTS = 2
 
 
 class ITSupportAgent:
+    """Stage 4: Workflow-controlled IT Support Agent."""
+
     def __init__(
         self,
         employee: EmployeeContext,
@@ -42,16 +33,28 @@ class ITSupportAgent:
             else OpenAI(
                 api_key=get_api_key(),
                 timeout=30.0,
-                max_retries=2,
+                max_retries=0,
             )
         )
 
         self.model = model or get_model()
 
-        self.history: list[Any] = []
+        self.workflow = Workflow()
         self.ticket_workflow = TicketWorkflow()
 
-    def chat(self, message: str) -> str:
+        self.diagnosis_service = DiagnosisService(
+            client=self.client,
+            model=self.model,
+        )
+
+        self.problem: str | None = None
+        self.diagnosis: DiagnosisResult | None = None
+        self.evidence: dict[str, Any] = {}
+        self.tool_calls_used = 0
+
+    def start(self, message: str) -> str:
+        """Start a new troubleshooting workflow."""
+
         message = message.strip()
 
         if not message:
@@ -60,150 +63,73 @@ class ITSupportAgent:
         if len(message) > 4000:
             raise ValueError("Message is too long.")
 
+        if self.workflow.state != WorkflowState.NEW:
+            return "A workflow already existes. Please finish or reset it."
+
         if not self.employee.authenticated:
+            self.workflow.fail()
             return "Authentication required."
 
-        # A pending proposal must be resolved before
-        # the agent can start another model workflow.
-        if self.ticket_workflow.pending is not None:
-            return (
-                "A ticket is waiting for confirmation. "
-                "Please confirm or cancel it first."
-            )
-
-        conversation: list[Any] = [
-            *self.history,
-            {"role": "user", "content": message},
-        ]
-
-        tool_calls_used = 0
+        self.problem = message
+        self.tool_calls_used = 0
+        self.evidence = {}
 
         try:
-            for _ in range(MAX_MODEL_ROUNDS):
-                response = self.client.responses.create(
-                    model=self.model,
-                    instructions=IT_SUPPORT_SYSTEM_PROMPT,
-                    input=conversation,
-                    tools=ALL_TOOLS,
-                    tool_choice="auto",
-                    parallel_tool_calls=False,
-                    store=False,
-                )
+            # Step 1: Check employee.
+            self.workflow.transition(WorkflowState.CHECKING_USER)
 
-                # Preserve every returned response item.
-                conversation.extend(response.output)
-
-                function_calls = [
-                    item for item in response.output if item.type == "function_call"
-                ]
-
-                if not function_calls:
-                    answer = (response.output_text or "").strip()
-
-                    if not answer:
-                        return "I could not generate an answer. Please try again."
-
-                    self._save_history(conversation)
-                    return answer
-
-                for call in function_calls:
-                    tool_calls_used += 1
-
-                    if tool_calls_used > MAX_TOOL_CALLS:
-                        return (
-                            "The troubleshooting process reached its tool-call limit."
-                        )
-
-                    result = self._handle_tool_call(call)
-
-                    conversation.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call.call_id,
-                            "output": json.dumps(result),
-                        }
-                    )
-
-                    # Stop before any ticket is created.
-                    if self.ticket_workflow.pending is not None:
-                        pending = self.ticket_workflow.pending
-
-                        # Do not save an incomplete tool call
-                        # sequence into conversation history.
-                        return (
-                            "I can create this support ticket:\n\n"
-                            f"Summary: {pending.summary}\n"
-                            f"Description: {pending.description}\n\n"
-                            "Please confirm or cancel."
-                        )
-
-            return (
-                "The troubleshooting process reached "
-                "its maximum number of model rounds."
+            user_result = self._read_tool(
+                "check_user",
+                {},
             )
 
-        except RateLimitError:
-            return "The AI service reached its usage limit."
+            if not user_result["found"]:
+                raise ToolError("Employee not found.")
 
-        except (APIConnectionError, APITimeoutError):
-            return "Unable to connect to the AI service."
+            user = user_result["user"]
 
-        except APIStatusError:
-            return "The AI service returned an error."
+            if not user["active"]:
+                raise ToolError("Employee is inactive.")
 
-    def _handle_tool_call(self, call: Any) -> dict:
-        try:
-            if call.name == "create_ticket":
-                args = validate_arguments(
-                    call.name,
-                    call.arguments,
-                )
+            self.evidence["user"] = user_result
 
-                self.ticket_workflow.prepare(
-                    employee=self.employee,
-                    args=args,
-                )
+            # Step 2: Search knowledge base.
+            self.workflow.transition(WorkflowState.SEARCHING_KB)
 
-                return {
-                    "status": "confirmation_required",
-                }
-
-            return execute_tool(
-                name=call.name,
-                arguments_json=call.arguments,
-                employee=self.employee,
+            kb_result = self._read_tool(
+                "search_knowledge_base",
+                {"query": message},
+                recoverable=True,
             )
 
-        except ToolError as error:
-            return {
-                "error": str(error),
-            }
+            self.evidence["knowledge_base"] = kb_result
 
-    def confirm_ticket(self) -> str:
-        try:
-            ticket = self.ticket_workflow.confirm(self.employee)
+            # Step 3: Check assigned device.
+            self.workflow.transition(WorkflowState.CHECKING_DEVICE)
 
-        except ToolError as error:
-            return f"Ticket creation failed: {error}"
+            device_result = self._read_tool(
+                "check_device",
+                {"device_id": user["device_id"]},
+                recoverable=True,
+            )
 
-        return (
-            "Support ticket created successfully.\n"
-            f"Ticket ID: {ticket['ticket_id']}\n"
-            f"Status: {ticket['status']}"
-        )
+            self.evidence["device"] = device_result
 
-    def cancel_ticket(self) -> str:
-        self.ticket_workflow.cancel()
-        return "Ticket creation cancelled."
+            # Step 4: Structured LLM diagnosis.
+            self.workflow.transition(WorkflowState.DIAGNOSING)
 
-    def reset_conversation(self) -> None:
-        self.history.clear()
-        self.ticket_workflow.cancel()
+            try:
+                self.diagnosis = self.diagnosis_service.diagnose(
+                    problem=message,
+                    evidence=self.evidence,
+                )
+            except DiagnosisError:
+                self.diagnosis = self._fallback_diagnosis()
 
-    def _save_history(
-        self,
-        conversation: list[Any],
-    ) -> None:
-        # Keep a bounded set of completed conversation turns.
-        # More advanced context management comes in Stage 7.
-        self.history = conversation[-MAX_HISTORY_ITEMS:]
+            self.workflow.transition(WorkflowState.WAITING_FOR_FEEDBACK)
+
+            return self._format_diagnosis()
+
+        except (ToolError, KeyError, TypeError) as exc:
+            self.workflow.fail()
+            return f"I could not complete the troubleshooting workflow: {exc}"

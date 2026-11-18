@@ -1,6 +1,8 @@
 # schemas.py
 
 
+from enum import Enum
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -49,11 +51,6 @@ class EmployeeContext(BaseModel):
             "ticket:create:self",
         }
     )
-
-
-from enum import Enum
-
-from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConfidenceLevel(str, Enum):
