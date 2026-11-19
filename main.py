@@ -2,11 +2,12 @@
 
 from agent import ITSupportAgent
 from schemas import EmployeeContext
+from workflow import WorkflowState
 
 
 def main() -> None:
     # Fictional authenticated employee.
-    # Real authentication will be added in Stage 8.
+    # Real authentication comes in Stage 8.
     employee = EmployeeContext(
         employee_id="EMP001",
         authenticated=True,
@@ -15,10 +16,12 @@ def main() -> None:
     agent = ITSupportAgent(employee=employee)
 
     print("=" * 55)
-    print("AI IT SUPPORT AGENT - STAGE 3")
+    print("AI IT SUPPORT AGENT - STAGE 4")
     print("=" * 55)
-    print("Type 'exit' to quit.")
-    print("Type 'reset' to clear the conversation.\n")
+
+    print("Commands:")
+    print("  reset - Start a new workflow")
+    print("  exit  - Quit the application\n")
 
     while True:
         try:
@@ -28,43 +31,59 @@ def main() -> None:
             print("\nGoodbye!")
             break
 
-        if message.lower() in {"exit", "quit"}:
+        command = message.lower()
+
+        if command in {"exit", "quit"}:
             print("Goodbye!")
             break
 
-        if message.lower() == "reset":
-            agent.reset_conversation()
-            print("Agent: Conversation reset.\n")
-            continue
-
-        # Confirmation is handled by Python, not the LLM.
-        if agent.ticket_workflow.pending is not None:
-            if message.lower() == "yes":
-                result = agent.confirm_ticket()
-                print(f"\nAgent: {result}\n")
-
-            elif message.lower() == "no":
-                result = agent.cancel_ticket()
-                print(f"\nAgent: {result}\n")
-
-            else:
-                print(
-                    "\nAgent: Please type 'yes' to create "
-                    "the ticket or 'no' to cancel.\n"
-                )
-
+        if command == "reset":
+            agent.reset()
+            print("Agent: Workflow reset.\n")
             continue
 
         if not message:
             print("Agent: Please enter a message.\n")
             continue
 
+        state = agent.workflow.state
+
         try:
-            response = agent.chat(message)
+            if state == WorkflowState.NEW:
+                response = agent.start(message)
+
+            elif state == WorkflowState.WAITING_FOR_FEEDBACK:
+                if command == "yes":
+                    response = agent.provide_feedback(True)
+
+                elif command == "no":
+                    response = agent.provide_feedback(False)
+
+                else:
+                    response = (
+                        "Please type yes if the issue is resolved, or no if it is not."
+                    )
+
+            elif state == (WorkflowState.WAITING_FOR_TICKET_CONFIRMATION):
+                if command == "yes":
+                    response = agent.confirm_ticket()
+
+                elif command == "no":
+                    response = agent.cancel_ticket()
+
+                else:
+                    response = "Please type yes to create the ticket or no to cancel."
+
+            else:
+                response = (
+                    f"Current workflow state: {state.value}\n"
+                    "Type reset to start a new incident."
+                )
+
             print(f"\nAgent: {response}\n")
 
-        except ValueError as error:
-            print(f"\nError: {error}\n")
+        except ValueError as exc:
+            print(f"\nError: {exc}\n")
 
 
 if __name__ == "__main__":

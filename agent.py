@@ -255,7 +255,7 @@ class ITSupportAgent:
         )
 
         args = CreateTicketArgs(
-            summary=self.problem[:200],
+            summary=("IT issue: " + self.problem)[:200],
             description=description[:2000],
         )
 

@@ -7,7 +7,7 @@ from schemas import CreateTicketArgs, EmployeeContext
 from tool_executor import ToolError
 
 
-@dataclass
+@dataclass(frozen=True)
 class PendingTicket:
     employee_id: str
     summary: str
@@ -42,10 +42,7 @@ class TicketWorkflow:
 
         return self.pending
 
-    def confirm(
-        self,
-        employee: EmployeeContext,
-    ) -> dict:
+    def confirm(self, employee: EmployeeContext) -> dict:
         pending = self.pending
 
         if pending is None:
@@ -65,15 +62,23 @@ class TicketWorkflow:
         if not user_result["found"] or not user_result["user"]["active"]:
             raise ToolError("Employee is not active.")
 
-        # Consume the proposal before executing the write.
-        # This prevents a second confirmation from reusing it.
+        # Consume the proposal before the write operation.
         self.pending = None
 
-        return tools.create_ticket(
-            employee_id=pending.employee_id,
-            summary=pending.summary,
-            description=pending.description,
-        )
+        try:
+            ticket = tools.create_ticket(
+                employee_id=pending.employee_id,
+                summary=pending.summary,
+                description=pending.description,
+            )
+
+        except Exception as exc:
+            raise ToolError(
+                "Ticket backend failed; creation status "
+                "may be unknown. Contact IT support."
+            ) from exc
+
+        return ticket
 
     def cancel(self) -> None:
         self.pending = None
