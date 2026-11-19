@@ -1,3 +1,6 @@
+# agent.py
+
+import json
 from typing import Any
 
 from openai import OpenAI
@@ -5,11 +8,12 @@ from openai import OpenAI
 from config import get_api_key, get_model
 from diagnosis import DiagnosisError, DiagnosisService
 from schemas import (
+    CreateTicketArgs,
     DiagnosisResult,
     EmployeeContext,
 )
 from ticket_workflow import TicketWorkflow
-from tool_executor import ToolError
+from tool_executor import ToolError, execute_tool
 from workflow import Workflow, WorkflowState
 
 MAX_TOOL_CALLS = 5
@@ -64,7 +68,7 @@ class ITSupportAgent:
             raise ValueError("Message is too long.")
 
         if self.workflow.state != WorkflowState.NEW:
-            return "A workflow already existes. Please finish or reset it."
+            return "A workflow already exists. Please finish or reset it."
 
         if not self.employee.authenticated:
             self.workflow.fail()
@@ -133,3 +137,185 @@ class ITSupportAgent:
         except (ToolError, KeyError, TypeError) as exc:
             self.workflow.fail()
             return f"I could not complete the troubleshooting workflow: {exc}"
+
+    def _read_tool(
+        self,
+        name: str,
+        arguments: dict,
+        *,
+        recoverable: bool = False,
+    ) -> dict:
+        """Execute a bounded, validated read-only tool."""
+
+        last_error: ToolError | None = None
+
+        for attempt in range(MAX_READ_ATTEMPTS):
+            if self.tool_calls_used >= MAX_TOOL_CALLS:
+                raise ToolError("Tool-call limit reached.")
+
+            self.tool_calls_used += 1
+
+            try:
+                return execute_tool(
+                    name=name,
+                    arguments_json=json.dumps(arguments),
+                    employee=self.employee,
+                )
+
+            except ToolError as exc:
+                last_error = exc
+
+                # Permission and authentication failures
+                # must never be retried or ignored.
+                if self._is_security_error(exc):
+                    raise
+
+                if attempt == MAX_READ_ATTEMPTS - 1:
+                    break
+
+        if recoverable:
+            return {
+                "found": False,
+                "error": "Tool data unavailable",
+            }
+
+        raise last_error or ToolError("Tool execution failed.")
+
+    @staticmethod
+    def _is_security_error(error: ToolError) -> bool:
+        text = str(error).lower()
+
+        return any(
+            phrase in text
+            for phrase in (
+                "authentication",
+                "permission",
+                "access denied",
+                "inactive",
+                "not allowed",
+            )
+        )
+
+    def _fallback_diagnosis(self) -> DiagnosisResult:
+        return DiagnosisResult(
+            problem=self.problem or "IT support issue",
+            likely_cause=(
+                "The cause could not be determined from the available information."
+            ),
+            confidence="low",
+            evidence=["Automated diagnosis was unavailable."],
+            troubleshooting_steps=[
+                "Check the network connection.",
+                "Restart the laptop if appropriate.",
+                "Contact IT support if the issue continues.",
+            ],
+            needs_escalation=True,
+        )
+
+    def _format_diagnosis(self) -> str:
+        if self.diagnosis is None:
+            return "No diagnosis is available."
+
+        diagnosis = self.diagnosis
+
+        steps = "\n".join(
+            f"{index}. {step}"
+            for index, step in enumerate(
+                diagnosis.troubleshooting_steps,
+                start=1,
+            )
+        )
+
+        return (
+            f"Problem: {diagnosis.problem}\n\n"
+            f"Likely cause: {diagnosis.likely_cause}\n"
+            f"Confidence: {diagnosis.confidence.value}\n\n"
+            f"Recommended steps:\n{steps}\n\n"
+            "Did these steps resolve the problem? "
+            "Please answer yes or no."
+        )
+
+    def provide_feedback(self, resolved: bool) -> str:
+        if self.workflow.state != WorkflowState.WAITING_FOR_FEEDBACK:
+            raise ValueError("The workflow is not waiting for feedback.")
+
+        if resolved:
+            self.workflow.transition(WorkflowState.RESOLVED)
+            return "Great! The issue is marked as resolved."
+
+        if self.problem is None:
+            self.workflow.fail()
+            return "No active problem was found."
+
+        description = (
+            f"Employee reported: {self.problem}\n"
+            f"Diagnosis: "
+            f"{self.diagnosis.likely_cause if self.diagnosis else 'Unknown'}\n"
+            "Troubleshooting did not resolve the issue."
+        )
+
+        args = CreateTicketArgs(
+            summary=self.problem[:200],
+            description=description[:2000],
+        )
+
+        try:
+            pending = self.ticket_workflow.prepare(
+                self.employee,
+                args,
+            )
+
+        except ToolError:
+            self.workflow.fail()
+            return (
+                "I cannot prepare a support ticket. Please contact IT support directly."
+            )
+
+        self.workflow.transition(WorkflowState.WAITING_FOR_TICKET_CONFIRMATION)
+
+        return (
+            "I can create this support ticket:\n\n"
+            f"Summary: {pending.summary}\n"
+            f"Description: {pending.description}\n\n"
+            "Type yes to confirm or no to cancel."
+        )
+
+    def confirm_ticket(self) -> str:
+        if self.workflow.state != WorkflowState.WAITING_FOR_TICKET_CONFIRMATION:
+            raise ValueError("No ticket is waiting for confirmation.")
+
+        self.workflow.transition(WorkflowState.CREATING_TICKET)
+
+        try:
+            ticket = self.ticket_workflow.confirm(self.employee)
+
+        except ToolError:
+            self.workflow.fail()
+            return "Ticket creation was not completed. Please contact IT support."
+
+        self.workflow.transition(WorkflowState.ESCALATED)
+
+        return (
+            "Support ticket created successfully.\n"
+            f"Ticket ID: {ticket['ticket_id']}\n"
+            f"Status: {ticket['status']}"
+        )
+
+    def cancel_ticket(self) -> str:
+        if self.workflow.state != WorkflowState.WAITING_FOR_TICKET_CONFIRMATION:
+            raise ValueError("No ticket is waiting for confirmation.")
+
+        self.ticket_workflow.cancel()
+
+        self.workflow.transition(WorkflowState.WAITING_FOR_FEEDBACK)
+
+        return "Ticket creation cancelled. No ticket was created."
+
+    def reset(self) -> None:
+        self.workflow.reset()
+        self.ticket_workflow.cancel()
+
+        self.problem = None
+        self.diagnosis = None
+        self.evidence = {}
+        self.tool_calls_used = 0
